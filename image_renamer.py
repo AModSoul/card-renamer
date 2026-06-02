@@ -56,13 +56,13 @@ def clean_collector_number(text):
     return cleaned
 
 
-def extract_text(image_path, width_percentage=0.90, height_percentage=0.2, check_bottom_left=False, low_confidence_threshold=None):
+def extract_text(image_path, width_percentage=0.90, height_percentage=0.25, check_bottom_left=False, low_confidence_threshold=None):
     """Extract text using EasyOCR
     
     Args:
         image_path: Path to the image file
         width_percentage: Percentage of image width to scan for card name (default: 0.90)
-        height_percentage: Percentage of image height to scan for card name (default: 0.2)
+        height_percentage: Percentage of image height to scan for card name (default: 0.25)
         check_bottom_left: If True, also detect collector info from bottom-left corner
         low_confidence_threshold: If set, use this confidence threshold as fallback (e.g., 0.4, 0.3, 0.2)
     
@@ -344,7 +344,7 @@ def clean_text_for_filename(text, max_length=100, collector_number=None, set_cod
     return filename if filename else None
 
 
-def rename_image(image_path, dry_run=False, width_percentage=0.90, height_percentage=0.2, verbose=False, low_confidence_threshold=None, skip_renamed=True):
+def rename_image(image_path, dry_run=False, width_percentage=0.90, height_percentage=0.25, verbose=False, low_confidence_threshold=None, skip_renamed=True):
     """
     Rename an image file based on text in the top-left corner.
     
@@ -449,7 +449,7 @@ def rename_image(image_path, dry_run=False, width_percentage=0.90, height_percen
     return True
 
 
-def process_directory(directory, dry_run=False, width_percentage=0.90, height_percentage=0.2, 
+def process_directory(directory, dry_run=False, width_percentage=0.90, height_percentage=0.25, 
                      recursive=False, verbose=False, extensions=None, low_confidence_threshold=None, skip_renamed=True):
     """
     Process all images in a directory.
@@ -532,8 +532,8 @@ Examples:
                        help='Show what would be renamed without actually renaming')
     parser.add_argument('--width', type=float, default=0.90, 
                        help='Percentage of image width to scan (0.0-1.0, default: 0.70)')
-    parser.add_argument('--height', type=float, default=0.2, 
-                       help='Percentage of image height to scan (0.0-1.0, default: 0.4)')
+    parser.add_argument('--height', type=float, default=0.25, 
+                       help='Percentage of image height to scan (0.0-1.0, default: 0.25)')
     parser.add_argument('-v', '--verbose', action='store_true', 
                        help='Show detailed output')
     parser.add_argument('--extensions', nargs='+', 
