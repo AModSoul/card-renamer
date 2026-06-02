@@ -32,13 +32,25 @@ if sys.stdout.encoding != 'utf-8':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 
-def extract_text(image_path, width_percentage=0.75, height_percentage=0.4):
-    """Extract text using EasyOCR"""
+def extract_text(image_path, width_percentage=0.75, height_percentage=0.4, check_bottom_left=False, low_confidence_threshold=None):
+    """Extract text using EasyOCR
+    
+    Args:
+        image_path: Path to the image file
+        width_percentage: Percentage of image width to scan for card name
+        height_percentage: Percentage of image height to scan for card name
+        check_bottom_left: If True, also detect collector info from bottom-left corner
+        low_confidence_threshold: If set, use this confidence threshold as fallback (e.g., 0.4, 0.3, 0.2)
+    
+    Returns:
+        If check_bottom_left is False: string with card name
+        If check_bottom_left is True: tuple of (card_name, collector_number, set_code)
+    """
     try:
         img = Image.open(image_path)
         width, height = img.size
         
-        # Crop to top-left region
+        # Crop to top-left region (Card Name detection)
         crop_width = int(width * width_percentage)
         crop_height = int(height * height_percentage)
         top_left_region = img.crop((0, 0, crop_width, crop_height))
@@ -46,7 +58,7 @@ def extract_text(image_path, width_percentage=0.75, height_percentage=0.4):
         # Get EasyOCR reader
         reader = get_easyocr_reader()
         
-        # Run detection
+        # Run detection on top-left
         results = reader.readtext(
             np.array(top_left_region),
             paragraph=False,
@@ -59,30 +71,76 @@ def extract_text(image_path, width_percentage=0.75, height_percentage=0.4):
         # Sort by position (top to bottom, left to right)
         results.sort(key=lambda x: (x[0][0][1], x[0][0][0]))
         
-        # Extract text with confidence > 0.5
+        # Extract text with confidence > 0.5 (strict)
         text_parts = [r[1] for r in results if r[2] > 0.5]
-        return ' '.join(text_parts).strip()
+        card_name = ' '.join(text_parts).strip()
+        
+        # Second pass: if nothing detected and low confidence threshold set, try lower threshold
+        if not card_name and low_confidence_threshold is not None:
+            text_parts = [r[1] for r in results if r[2] > low_confidence_threshold]
+            card_name = ' '.join(text_parts).strip()
+        
+        # Optionally check bottom-left corner (Collector Info detection)
+        if check_bottom_left:
+            # Bottom left region: 14% from left and bottom edges
+            bottom_left_width = int(width * 0.14)
+            bottom_left_height = int(height * 0.14)
+            bottom_left_x = 0
+            bottom_left_y = height - bottom_left_height
+            bottom_left_region = img.crop((bottom_left_x, bottom_left_y, bottom_left_width, height))
+            
+            # Run detection on bottom-left
+            bottom_results = reader.readtext(
+                np.array(bottom_left_region),
+                paragraph=False,
+                contrast_ths=0.3,
+                adjust_contrast=0.8,
+                text_threshold=0.6,
+                low_text=0.3
+            )
+            
+            # Sort by position (top to bottom)
+            bottom_results.sort(key=lambda x: (x[0][0][1], x[0][0][0]))
+            
+            # Extract text with confidence > 0.5 (strict)
+            bottom_text_parts = [r[1] for r in bottom_results if r[2] > 0.5]
+            
+            # Second pass: if nothing detected and low confidence threshold set, try lower threshold
+            if not bottom_text_parts and low_confidence_threshold is not None:
+                bottom_text_parts = [r[1] for r in bottom_results if r[2] > low_confidence_threshold]
+            
+            # Parse collector info: first line = collector number, second line = set code
+            collector_number = bottom_text_parts[0].strip() if len(bottom_text_parts) > 0 else None
+            set_code = bottom_text_parts[1].strip() if len(bottom_text_parts) > 1 else None
+            
+            return (card_name, collector_number, set_code)
+        
+        return card_name
         
     except Exception as e:
         print(f"OCR error: {e}")
+        if check_bottom_left:
+            return ("", None, None)
         return ""
 
 
-def clean_text_for_filename(text, max_length=100):
+def clean_text_for_filename(text, max_length=100, collector_number=None, set_code=None):
     """
     Clean extracted text to create a valid filename.
     
     Args:
-        text: Raw text from OCR
+        text: Raw card name text from OCR
         max_length: Maximum length for the filename
+        collector_number: Optional collector number to include in {}
+        set_code: Optional set code to include in []
     
     Returns:
-        Cleaned text suitable for a filename
+        Cleaned text suitable for a filename in format: "Card Name {number} [code]"
     """
     if not text:
         return None
     
-    # Take the first non-empty line
+    # Take the first non-empty line for card name
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     if not lines:
         return None
@@ -118,10 +176,17 @@ def clean_text_for_filename(text, max_length=100):
     if len(filename) < 2:
         return None
     
+    # Add collector info if provided
+    # Format: "Card Name [set_code] {collector_number}"
+    if set_code:
+        filename = f"{filename} [{set_code}]"
+    if collector_number:
+        filename = f"{filename} {{{collector_number}}}"
+    
     return filename if filename else None
 
 
-def rename_image(image_path, dry_run=False, width_percentage=0.75, height_percentage=0.4, verbose=False):
+def rename_image(image_path, dry_run=False, width_percentage=0.75, height_percentage=0.4, verbose=False, low_confidence_threshold=None, skip_renamed=True):
     """
     Rename an image file based on text in the top-left corner.
     
@@ -131,6 +196,8 @@ def rename_image(image_path, dry_run=False, width_percentage=0.75, height_percen
         width_percentage: Percentage of image width to scan for text
         height_percentage: Percentage of image height to scan for text
         verbose: If True, show detailed output
+        low_confidence_threshold: If set, use this confidence threshold as fallback (e.g., 0.4)
+        skip_renamed: If True, skip files that already have collector info in filename
     
     Returns:
         True if renamed successfully, False otherwise
@@ -141,18 +208,40 @@ def rename_image(image_path, dry_run=False, width_percentage=0.75, height_percen
         print(f"File not found: {image_path}")
         return False
     
+    # Check if file is already renamed (has collector info pattern like [CODE] {NUMBER})
+    if skip_renamed and low_confidence_threshold is not None:
+        filename_no_ext = image_path.stem
+        # Check for pattern: [XXX] {NNNN}
+        if re.search(r'\[\w+\]\s*\{\d+\}', filename_no_ext):
+            if verbose:
+                print(f"  [SKIP] Already renamed: {image_path.name}", flush=True)
+            else:
+                print(f"  [SKIP] {image_path.name}", flush=True)
+            return False
+    
     # Extract text from top-left
     if verbose:
         print(f"Processing: {image_path.name}")
     
-    # Extract text using EasyOCR
-    text = extract_text(image_path, width_percentage, height_percentage)
+    # Extract text using EasyOCR with collector info detection
+    result = extract_text(image_path, width_percentage, height_percentage, check_bottom_left=True, low_confidence_threshold=low_confidence_threshold)
     
-    if verbose and text:
-        print(f"  Detected text: {text[:100]}...")
-    
-    # Clean text for filename
-    new_name = clean_text_for_filename(text)
+    # Handle tuple return (card_name, collector_number, set_code)
+    if isinstance(result, tuple):
+        card_name, collector_number, set_code = result
+        if verbose and card_name:
+            print(f"  Card Name: {card_name}")
+            if collector_number:
+                print(f"  Collector Number: {collector_number}")
+            if set_code:
+                print(f"  Set Code: {set_code}")
+        # Clean text for filename with collector info
+        new_name = clean_text_for_filename(card_name, collector_number=collector_number, set_code=set_code)
+    else:
+        # Backwards compatibility if check_bottom_left was False
+        if verbose and result:
+            print(f"  Detected text: {result[:100]}...")
+        new_name = clean_text_for_filename(result)
     
     if not new_name:
         print(f"  [!] No text detected in {image_path.name}", flush=True)
@@ -203,7 +292,7 @@ def rename_image(image_path, dry_run=False, width_percentage=0.75, height_percen
 
 
 def process_directory(directory, dry_run=False, width_percentage=0.75, height_percentage=0.4, 
-                     recursive=False, verbose=False, extensions=None):
+                     recursive=False, verbose=False, extensions=None, low_confidence_threshold=None, skip_renamed=True):
     """
     Process all images in a directory.
     
@@ -215,6 +304,8 @@ def process_directory(directory, dry_run=False, width_percentage=0.75, height_pe
         recursive: If True, process subdirectories
         verbose: If True, show detailed output
         extensions: List of file extensions to process (e.g., ['.jpg', '.png'])
+        low_confidence_threshold: If set, use this confidence threshold as fallback (e.g., 0.4)
+        skip_renamed: If True, skip files that already have collector info in filename
     
     Returns:
         Number of files successfully renamed
@@ -247,7 +338,7 @@ def process_directory(directory, dry_run=False, width_percentage=0.75, height_pe
     for idx, image_file in enumerate(image_files, 1):
         # Print progress to keep terminal responsive
         print(f"[{idx}/{len(image_files)}] ", end='', flush=True)
-        if rename_image(image_file, dry_run, width_percentage, height_percentage, verbose):
+        if rename_image(image_file, dry_run, width_percentage, height_percentage, verbose, low_confidence_threshold, skip_renamed):
             renamed_count += 1
         sys.stdout.flush()  # Force output to appear immediately
     
@@ -289,6 +380,10 @@ Examples:
                        help='Show detailed output')
     parser.add_argument('--extensions', nargs='+', 
                        help='File extensions to process (default: .jpg .jpeg .png .bmp .tiff .gif .webp)')
+    parser.add_argument('--low-confidence', type=float, nargs='?', const=0.4, metavar='THRESHOLD',
+                       help='Enable lower confidence threshold as fallback (default: 0.4, range: 0.0-1.0)')
+    parser.add_argument('--no-skip', action='store_true',
+                       help='Do not skip already-renamed files (only applies with --low-confidence)')
     
     args = parser.parse_args()
     
@@ -300,12 +395,18 @@ Examples:
         print("Error: --height must be between 0.0 and 1.0")
         return 1
     
+    # Validate low confidence threshold if provided
+    if args.low_confidence is not None and not 0.0 < args.low_confidence <= 1.0:
+        print("Error: --low-confidence must be between 0.0 and 1.0")
+        return 1
+    
     # Process single image or directory
+    skip_renamed = not args.no_skip  # Invert the flag: --no-skip means skip_renamed=False
     if args.image:
-        rename_image(args.image, args.dry_run, args.width, args.height, args.verbose)
+        rename_image(args.image, args.dry_run, args.width, args.height, args.verbose, args.low_confidence, skip_renamed)
     elif args.directory:
         process_directory(args.directory, args.dry_run, args.width, args.height, 
-                         args.recursive, args.verbose, args.extensions)
+                         args.recursive, args.verbose, args.extensions, args.low_confidence, skip_renamed)
     else:
         parser.print_help()
         return 1
