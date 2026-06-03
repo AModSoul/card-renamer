@@ -52,17 +52,17 @@ def clean_collector_number(text):
     # (handles cases like "mc", "We", "nec" which are all letters)
     if not cleaned:
         return text
-    
+    cleaned = re.sub(r'^0+', '', cleaned) or '0'
     return cleaned
 
 
-def extract_text(image_path, width_percentage=0.90, height_percentage=0.25, check_bottom_left=False, low_confidence_threshold=None):
+def extract_text(image_path, width_percentage=0.90, height_percentage=0.20, check_bottom_left=False, low_confidence_threshold=None):
     """Extract text using EasyOCR
     
     Args:
         image_path: Path to the image file
         width_percentage: Percentage of image width to scan for card name (default: 0.90)
-        height_percentage: Percentage of image height to scan for card name (default: 0.25)
+        height_percentage: Percentage of image height to scan for card name (default: 0.20)
         check_bottom_left: If True, also detect collector info from bottom-left corner
         low_confidence_threshold: If set, use this confidence threshold as fallback (e.g., 0.4, 0.3, 0.2)
     
@@ -96,14 +96,17 @@ def extract_text(image_path, width_percentage=0.90, height_percentage=0.25, chec
         confidence_threshold = 0.6
         filtered_results = [r for r in results if r[2] > confidence_threshold]
         
-        # Second pass: if nothing detected and low confidence threshold set, try lower threshold
-        if not filtered_results and low_confidence_threshold is not None:
-            confidence_threshold = low_confidence_threshold
-            filtered_results = [r for r in results if r[2] > confidence_threshold]
-        
         # Filter out single-character or very short detections (likely symbols/card text, not card names)
         # Keep only detections with 2+ characters or common single letters in card names (like "X")
         filtered_results = [r for r in filtered_results if len(r[1].strip()) >= 2 or r[1].strip() in ['X']]
+        
+        # Second pass: if nothing detected and low confidence threshold set, try lower threshold
+        # (checked AFTER length filter so single chars like mana costs don't prevent retry)
+        if not filtered_results and low_confidence_threshold is not None:
+            confidence_threshold = low_confidence_threshold
+            filtered_results = [r for r in results if r[2] > confidence_threshold]
+            # Re-apply length filter
+            filtered_results = [r for r in filtered_results if len(r[1].strip()) >= 2 or r[1].strip() in ['X']]
         
         # Group detections by Y-position (multi-line card names)
         # Group texts that are within 20 pixels vertically
@@ -147,9 +150,9 @@ def extract_text(image_path, width_percentage=0.90, height_percentage=0.25, chec
         
         # Optionally check bottom-left corner (Collector Info detection)
         if check_bottom_left:
-            # Bottom left region: 20% from left, 10% from bottom edges
+            # Bottom left region: 20% from left, 14% from bottom edges
             bottom_left_width = int(width * 0.20)
-            bottom_left_height = int(height * 0.10)
+            bottom_left_height = int(height * 0.14)
             bottom_left_x = 0
             bottom_left_y = height - bottom_left_height
             bottom_left_region = img.crop((bottom_left_x, bottom_left_y, bottom_left_width, height))
@@ -182,28 +185,27 @@ def extract_text(image_path, width_percentage=0.90, height_percentage=0.25, chec
             
             # Process high confidence detections first
             for text in bottom_text_parts:
-                # Look for collector number (has 3-4 consecutive digits, possibly with leading letter)
                 if re.search(r'\d{3,4}', text) and not collector_number:
-                    # Extract the number part
                     match = re.search(r'[A-Z]?\s*(\d{3,4})', text)
                     if match:
                         collector_number = match.group(1)
-                # Look for set code (2-3 uppercase letters, may have dots/spaces)
-                # Must not contain digits (to avoid matching collector numbers like "R 1506")
-                elif not re.search(r'\d', text) and not set_code:
-                    # Extract first occurrence of 2-3 consecutive uppercase letters
-                    match = re.search(r'[A-Z]{2,3}', text)
+                elif not set_code:
+                    match = re.search(r'([A-Z][A-Z0-9]{1,3})', text)
                     if match:
-                        set_code = match.group(0)
+                        set_code = match.group(1)
             
-            # If no set code found in high confidence detections, try ALL detections with lower threshold
             if not set_code:
                 for bbox, text, conf in bottom_results:
-                    if conf > 0.15 and not re.search(r'\d', text):  # Lower threshold for set codes
-                        match = re.search(r'[A-Z]{2,3}', text)
+                    if conf > 0.15 and not set_code:
+                        match = re.search(r'([A-Z][A-Z0-9]{1,3})', text)
                         if match:
-                            set_code = match.group(0)
+                            set_code = match.group(1)
                             break
+
+            if collector_number:
+                collector_number = clean_collector_number(collector_number)
+            if not card_name and collector_number:
+                card_name = Path(image_path).stem.split(' [')[0].strip() or "Card"
             
             return (card_name, collector_number, set_code)
         
@@ -249,6 +251,7 @@ def fix_contractions(text):
         r'\bHes\b': "He's",
         r'\bShes\b': "She's",
         r'\bIts\b': "It's",
+        r"'\s*\$\s*": "'s ",
         r'\bThats\b': "That's",
         r'\bWhats\b': "What's",
         r'\bWhos\b': "Who's",
@@ -344,7 +347,7 @@ def clean_text_for_filename(text, max_length=100, collector_number=None, set_cod
     return filename if filename else None
 
 
-def rename_image(image_path, dry_run=False, width_percentage=0.90, height_percentage=0.25, verbose=False, low_confidence_threshold=None, skip_renamed=True):
+def rename_image(image_path, dry_run=False, width_percentage=0.90, height_percentage=0.20, verbose=False, low_confidence_threshold=None, skip_renamed=True):
     """
     Rename an image file based on text in the top-left corner.
     
@@ -449,7 +452,7 @@ def rename_image(image_path, dry_run=False, width_percentage=0.90, height_percen
     return True
 
 
-def process_directory(directory, dry_run=False, width_percentage=0.90, height_percentage=0.25, 
+def process_directory(directory, dry_run=False, width_percentage=0.90, height_percentage=0.20, 
                      recursive=False, verbose=False, extensions=None, low_confidence_threshold=None, skip_renamed=True):
     """
     Process all images in a directory.
@@ -531,9 +534,9 @@ Examples:
     parser.add_argument('--dry-run', action='store_true', 
                        help='Show what would be renamed without actually renaming')
     parser.add_argument('--width', type=float, default=0.90, 
-                       help='Percentage of image width to scan (0.0-1.0, default: 0.70)')
-    parser.add_argument('--height', type=float, default=0.25, 
-                       help='Percentage of image height to scan (0.0-1.0, default: 0.25)')
+                       help='Percentage of image width to scan (0.0-1.0, default: 0.90)')
+    parser.add_argument('--height', type=float, default=0.20, 
+                       help='Percentage of image height to scan (0.0-1.0, default: 0.20)')
     parser.add_argument('-v', '--verbose', action='store_true', 
                        help='Show detailed output')
     parser.add_argument('--extensions', nargs='+', 

@@ -48,3 +48,4 @@ test_images/
 *.bmp
 *.tiff
 *.gif
+filtered_cards.json
